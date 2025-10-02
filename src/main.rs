@@ -1,3 +1,178 @@
-fn main() {
-    println!("Hello, world!");
+use std::{error::Error, io, time::Duration};
+
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::{execute, terminal::EnterAlternateScreen, terminal::LeaveAlternateScreen};
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders, Paragraph};
+
+use openai::chat::{ChatCompletion, ChatCompletionMessage, ChatCompletionMessageRole};
+
+struct App {
+    input: String,
+    messages: Vec<(String, String)>, // (role, content)
+    model: String,
+    status: String,
+}
+
+impl App {
+    fn new() -> Self {
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        Self {
+            input: String::new(),
+            messages: vec![(
+                "system".to_string(),
+                "你是一个助理，帮助进行AI编码。".to_string(),
+            )],
+            model,
+            status: String::from("按 Enter 发送，Esc 退出"),
+        }
+    }
+}
+
+fn ui(frame: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Min(4),
+                Constraint::Length(3),
+                Constraint::Length(1),
+            ]
+            .as_ref(),
+        )
+        .split(frame.area());
+
+    // Render messages
+    let history_text = app
+        .messages
+        .iter()
+        .map(|(role, content)| format!("{}: {}", role, content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let history =
+        Paragraph::new(history_text).block(Block::default().title("对话").borders(Borders::ALL));
+    frame.render_widget(history, chunks[0]);
+
+    // Render input
+    let input = Paragraph::new(app.input.as_str())
+        .block(Block::default().title("输入").borders(Borders::ALL));
+    frame.render_widget(input, chunks[1]);
+
+    // Render status
+    let status = Paragraph::new(app.status.as_str()).block(Block::default().borders(Borders::ALL));
+    frame.render_widget(status, chunks[2]);
+}
+
+async fn send_to_openai(app: &mut App) -> Result<String, Box<dyn Error>> {
+    // Build messages in OpenAI format
+    let mut msgs: Vec<ChatCompletionMessage> = Vec::new();
+    for (role, content) in &app.messages {
+        let role_enum = match role.as_str() {
+            "system" => ChatCompletionMessageRole::System,
+            "assistant" => ChatCompletionMessageRole::Assistant,
+            _ => ChatCompletionMessageRole::User,
+        };
+        msgs.push(ChatCompletionMessage {
+            role: role_enum,
+            content: Some(content.clone()),
+            name: None,
+            function_call: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    // Append current user input as the latest message
+    msgs.push(ChatCompletionMessage {
+        role: ChatCompletionMessageRole::User,
+        content: Some(app.input.clone()),
+        name: None,
+        function_call: None,
+        tool_calls: None,
+        tool_call_id: None,
+    });
+
+    // Build request and call API
+    let req = ChatCompletion::builder(&app.model, msgs).build()?;
+    let res = ChatCompletion::create(req).await?;
+
+    let first = res
+        .choices
+        .get(0)
+        .and_then(|c| c.message.content.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "(无内容)".to_string());
+
+    Ok(first)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    // Ensure API key is present
+    if std::env::var("OPENAI_API_KEY").is_err() {
+        eprintln!("未检测到环境变量 `OPENAI_API_KEY`，请先设置后再运行。");
+        eprintln!(
+            "PowerShell 示例：$Env:OPENAI_API_KEY='sk-...'\n可选：$Env:OPENAI_MODEL='gpt-4o-mini'"
+        );
+        return Ok(());
+    }
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+
+    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    let mut terminal = ratatui::Terminal::new(backend)?;
+
+    let mut app = App::new();
+
+    loop {
+        terminal.draw(|f| ui(f, &app))?;
+
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Esc => break,
+                        KeyCode::Enter => {
+                            if !app.input.trim().is_empty() {
+                                app.messages.push(("user".to_string(), app.input.clone()));
+                                app.status = "正在请求OpenAI...".to_string();
+                                terminal.draw(|f| ui(f, &app))?;
+
+                                match send_to_openai(&mut app).await {
+                                    Ok(reply) => {
+                                        app.messages.push(("assistant".to_string(), reply));
+                                        app.status = "按 Enter 发送，Esc 退出".to_string();
+                                    }
+                                    Err(e) => {
+                                        app.status = format!("请求失败: {}", e);
+                                    }
+                                }
+                                app.input.clear();
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            app.input.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            app.input.pop();
+                        }
+                        KeyCode::Tab => {
+                            app.input.push('\t');
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // restore terminal
+    disable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, LeaveAlternateScreen)?;
+
+    Ok(())
 }
