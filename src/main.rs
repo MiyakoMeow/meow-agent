@@ -12,20 +12,47 @@ struct App {
     input: String,
     messages: Vec<(String, String)>, // (role, content)
     model: String,
-    status: String,
+}
+
+fn mask_api_key(key: &str) -> String {
+    if key.is_empty() {
+        return "(未设置)".to_string();
+    }
+    let len = key.len();
+    if len <= 6 {
+        return "*".repeat(len);
+    }
+    let prefix = &key[..3];
+    let suffix = &key[len - 3..];
+    format!("{}{}{}", prefix, "*".repeat(len - 6), suffix)
 }
 
 impl App {
     fn new() -> Self {
         let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
-        Self {
-            input: String::new(),
-            messages: vec![(
+        let api_base = std::env::var("OPENAI_API_BASE")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        let masked_key = mask_api_key(&api_key);
+
+        let messages = vec![
+            (
                 "system".to_string(),
                 "你是一个助理，帮助进行AI编码。".to_string(),
-            )],
+            ),
+            (
+                "system".to_string(),
+                format!(
+                    "当前配置：api_base={}, model={}, api_key={}",
+                    api_base, model, masked_key
+                ),
+            ),
+        ];
+
+        Self {
+            input: String::new(),
+            messages,
             model,
-            status: String::from("按 Enter 发送，Esc 退出"),
         }
     }
 }
@@ -33,14 +60,7 @@ impl App {
 fn ui(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Min(4),
-                Constraint::Length(3),
-                Constraint::Length(1),
-            ]
-            .as_ref(),
-        )
+        .constraints([Constraint::Min(5), Constraint::Length(3)].as_ref())
         .split(frame.area());
 
     // Render messages
@@ -54,14 +74,13 @@ fn ui(frame: &mut Frame, app: &App) {
         Paragraph::new(history_text).block(Block::default().title("对话").borders(Borders::ALL));
     frame.render_widget(history, chunks[0]);
 
-    // Render input
-    let input = Paragraph::new(app.input.as_str())
-        .block(Block::default().title("输入").borders(Borders::ALL));
+    // Render input（底部）
+    let input = Paragraph::new(app.input.as_str()).block(
+        Block::default()
+            .title("输入（Enter 发送，Esc 退出）")
+            .borders(Borders::ALL),
+    );
     frame.render_widget(input, chunks[1]);
-
-    // Render status
-    let status = Paragraph::new(app.status.as_str()).block(Block::default().borders(Borders::ALL));
-    frame.render_widget(status, chunks[2]);
 }
 
 async fn send_to_openai(app: &mut App) -> Result<String, Box<dyn Error>> {
@@ -138,16 +157,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         KeyCode::Enter => {
                             if !app.input.trim().is_empty() {
                                 app.messages.push(("user".to_string(), app.input.clone()));
-                                app.status = "正在请求OpenAI...".to_string();
-                                terminal.draw(|f| ui(f, &app))?;
 
                                 match send_to_openai(&mut app).await {
                                     Ok(reply) => {
                                         app.messages.push(("assistant".to_string(), reply));
-                                        app.status = "按 Enter 发送，Esc 退出".to_string();
                                     }
                                     Err(e) => {
-                                        app.status = format!("请求失败: {}", e);
+                                        app.messages.push((
+                                            "system".to_string(),
+                                            format!("请求失败: {}", e),
+                                        ));
                                     }
                                 }
                                 app.input.clear();
