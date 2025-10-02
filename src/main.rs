@@ -85,22 +85,25 @@ fn ui(frame: &mut Frame, app: &App) {
 
 async fn send_to_openai(app: &mut App) -> Result<String, Box<dyn Error>> {
     // Build messages in OpenAI format
-    let mut msgs: Vec<ChatCompletionMessage> = Vec::new();
-    for (role, content) in &app.messages {
-        let role_enum = match role.as_str() {
-            "system" => ChatCompletionMessageRole::System,
-            "assistant" => ChatCompletionMessageRole::Assistant,
-            _ => ChatCompletionMessageRole::User,
-        };
-        msgs.push(ChatCompletionMessage {
-            role: role_enum,
-            content: Some(content.clone()),
-            name: None,
-            function_call: None,
-            tool_calls: None,
-            tool_call_id: None,
-        });
-    }
+    let mut msgs: Vec<ChatCompletionMessage> = app
+        .messages
+        .iter()
+        .map(|(role, content)| {
+            let role_enum = match role.as_str() {
+                "system" => ChatCompletionMessageRole::System,
+                "assistant" => ChatCompletionMessageRole::Assistant,
+                _ => ChatCompletionMessageRole::User,
+            };
+            ChatCompletionMessage {
+                role: role_enum,
+                content: Some(content.clone()),
+                name: None,
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }
+        })
+        .collect();
 
     // Append current user input as the latest message
     msgs.push(ChatCompletionMessage {
@@ -116,26 +119,28 @@ async fn send_to_openai(app: &mut App) -> Result<String, Box<dyn Error>> {
     let req = ChatCompletion::builder(&app.model, msgs).build()?;
     let res = ChatCompletion::create(req).await?;
 
-    let first = res
+    let Some(first) = res
         .choices
         .get(0)
         .and_then(|c| c.message.content.as_ref())
         .cloned()
-        .unwrap_or_else(|| "(无内容)".to_string());
+    else {
+        return Ok("(无内容)".to_string());
+    };
 
     Ok(first)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Ensure API key is present
-    if std::env::var("OPENAI_API_KEY").is_err() {
+    // Ensure API key is present (let-else)
+    let Ok(_) = std::env::var("OPENAI_API_KEY") else {
         eprintln!("未检测到环境变量 `OPENAI_API_KEY`，请先设置后再运行。");
         eprintln!(
             "PowerShell 示例：$Env:OPENAI_API_KEY='sk-...'\n可选：$Env:OPENAI_MODEL='gpt-4o-mini'"
         );
         return Ok(());
-    }
+    };
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -149,42 +154,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         terminal.draw(|f| ui(f, &app))?;
 
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Esc => break,
-                        KeyCode::Enter => {
-                            if !app.input.trim().is_empty() {
-                                app.messages.push(("user".to_string(), app.input.clone()));
+        if !event::poll(Duration::from_millis(200))? {
+            continue;
+        }
 
-                                match send_to_openai(&mut app).await {
-                                    Ok(reply) => {
-                                        app.messages.push(("assistant".to_string(), reply));
-                                    }
-                                    Err(e) => {
-                                        app.messages.push((
-                                            "system".to_string(),
-                                            format!("请求失败: {}", e),
-                                        ));
-                                    }
-                                }
-                                app.input.clear();
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            app.input.push(c);
-                        }
-                        KeyCode::Backspace => {
-                            app.input.pop();
-                        }
-                        KeyCode::Tab => {
-                            app.input.push('\t');
-                        }
-                        _ => {}
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match key.code {
+            KeyCode::Esc => break,
+            KeyCode::Enter => {
+                if app.input.trim().is_empty() {
+                    continue;
+                }
+
+                app.messages.push(("user".to_string(), app.input.clone()));
+                match send_to_openai(&mut app).await {
+                    Ok(reply) => {
+                        app.messages.push(("assistant".to_string(), reply));
+                    }
+                    Err(e) => {
+                        app.messages
+                            .push(("system".to_string(), format!("请求失败: {}", e)));
                     }
                 }
+                app.input.clear();
             }
+            KeyCode::Char(c) => {
+                app.input.push(c);
+            }
+            KeyCode::Backspace => {
+                app.input.pop();
+            }
+            KeyCode::Tab => {
+                app.input.push('\t');
+            }
+            _ => {}
         }
     }
 
