@@ -6,7 +6,10 @@ use crossterm::{execute, terminal::EnterAlternateScreen, terminal::LeaveAlternat
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use openai::chat::{ChatCompletion, ChatCompletionMessage, ChatCompletionMessageRole};
+use openai::chat::{
+    ChatCompletion, ChatCompletionDelta, ChatCompletionMessage, ChatCompletionMessageRole,
+};
+use tokio::sync::mpsc::error::TryRecvError;
 
 enum Status {
     Idle,
@@ -106,9 +109,14 @@ fn ui(frame: &mut Frame, app: &App) {
     frame.render_widget(input, chunks[2]);
 }
 
-async fn send_to_openai(app: &mut App) -> Result<String, Box<dyn Error>> {
-    // Build messages in OpenAI format
-    let mut msgs: Vec<ChatCompletionMessage> = app
+// 已移除非流式响应函数，统一使用流式响应
+
+async fn stream_to_openai(
+    app: &mut App,
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+) -> Result<(), Box<dyn Error>> {
+    // Build messages in OpenAI format（包含最新的 user 输入）
+    let msgs: Vec<ChatCompletionMessage> = app
         .messages
         .iter()
         .map(|(role, content)| {
@@ -128,30 +136,42 @@ async fn send_to_openai(app: &mut App) -> Result<String, Box<dyn Error>> {
         })
         .collect();
 
-    // Append current user input as the latest message
-    msgs.push(ChatCompletionMessage {
-        role: ChatCompletionMessageRole::User,
-        content: Some(app.input.clone()),
-        name: None,
-        function_call: None,
-        tool_calls: None,
-        tool_call_id: None,
-    });
+    // 创建流
+    let mut chat_stream = ChatCompletionDelta::builder(&app.model, msgs.clone())
+        .create_stream()
+        .await?;
 
-    // Build request and call API
-    let req = ChatCompletion::builder(&app.model, msgs).build()?;
-    let res = ChatCompletion::create(req).await?;
+    // 追加占位的 assistant 消息，用于边收边显示
+    app.messages.push(("assistant".to_string(), String::new()));
+    let idx = app.messages.len() - 1;
 
-    let Some(first) = res
-        .choices
-        .get(0)
-        .and_then(|c| c.message.content.as_ref())
-        .cloned()
-    else {
-        return Ok("(无内容)".to_string());
-    };
+    let mut merged: Option<ChatCompletionDelta> = None;
+    loop {
+        match chat_stream.try_recv() {
+            Ok(delta) => {
+                if let Some(content) = &delta.choices[0].delta.content {
+                    app.messages[idx].1.push_str(content);
+                    // 每收到一段内容就重绘
+                    terminal.draw(|f| ui(f, &app))?;
+                }
 
-    Ok(first)
+                if let Some(m) = merged.as_mut() {
+                    // 合并增量
+                    m.merge(delta)?;
+                } else {
+                    merged = Some(delta);
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+
+    // 可选：将最终合并结果转为完整 ChatCompletion（当前未使用）
+    let _final_completion: ChatCompletion = merged.unwrap().into();
+    Ok(())
 }
 
 #[tokio::main]
@@ -198,16 +218,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 app.messages.push(("user".to_string(), app.input.clone()));
                 app.status = Status::Requesting;
                 terminal.draw(|f| ui(f, &app))?;
-                match send_to_openai(&mut app).await {
-                    Ok(reply) => {
-                        app.messages.push(("assistant".to_string(), reply));
-                        app.status = Status::Idle;
-                    }
-                    Err(e) => {
-                        app.messages
-                            .push(("system".to_string(), format!("请求失败: {}", e)));
-                        app.status = Status::Error(e.to_string());
-                    }
+                if let Err(e) = stream_to_openai(&mut app, &mut terminal).await {
+                    app.messages
+                        .push(("system".to_string(), format!("请求失败: {}", e)));
+                    app.status = Status::Error(e.to_string());
+                } else {
+                    app.status = Status::Idle;
                 }
                 app.input.clear();
             }
