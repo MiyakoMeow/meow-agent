@@ -1,0 +1,8 @@
+[package]
+name = "meow-agent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+openai = "1.1.1"
+ratatui = "0.29.0"
