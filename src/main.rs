@@ -8,11 +8,17 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use openai::chat::{ChatCompletion, ChatCompletionMessage, ChatCompletionMessageRole};
 
+enum Status {
+    Idle,
+    Requesting,
+    Error(String),
+}
+
 struct App {
     input: String,
     messages: Vec<(String, String)>, // (role, content)
     model: String,
-    status: String,
+    status: Status,
 }
 
 fn mask_api_key(key: &str) -> String {
@@ -54,7 +60,7 @@ impl App {
             input: String::new(),
             messages,
             model,
-            status: String::from("按 Enter 发送，Esc 退出"),
+            status: Status::Idle,
         }
     }
 }
@@ -83,7 +89,12 @@ fn ui(frame: &mut Frame, app: &App) {
     frame.render_widget(history, chunks[0]);
 
     // Render status（输入框上方，无边框）
-    let status = Paragraph::new(app.status.as_str());
+    let status_text = match &app.status {
+        Status::Idle => "按 Enter 发送，Esc 退出".to_string(),
+        Status::Requesting => "正在请求OpenAI...".to_string(),
+        Status::Error(e) => format!("请求失败: {}", e),
+    };
+    let status = Paragraph::new(status_text);
     frame.render_widget(status, chunks[1]);
 
     // Render input（底部）
@@ -185,17 +196,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
 
                 app.messages.push(("user".to_string(), app.input.clone()));
-                app.status = "正在请求OpenAI...".to_string();
+                app.status = Status::Requesting;
                 terminal.draw(|f| ui(f, &app))?;
                 match send_to_openai(&mut app).await {
                     Ok(reply) => {
                         app.messages.push(("assistant".to_string(), reply));
-                        app.status = "按 Enter 发送，Esc 退出".to_string();
+                        app.status = Status::Idle;
                     }
                     Err(e) => {
                         app.messages
                             .push(("system".to_string(), format!("请求失败: {}", e)));
-                        app.status = format!("请求失败: {}", e);
+                        app.status = Status::Error(e.to_string());
                     }
                 }
                 app.input.clear();
