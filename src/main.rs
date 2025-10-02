@@ -12,6 +12,7 @@ struct App {
     input: String,
     messages: Vec<(String, String)>, // (role, content)
     model: String,
+    status: String,
 }
 
 fn mask_api_key(key: &str) -> String {
@@ -53,6 +54,7 @@ impl App {
             input: String::new(),
             messages,
             model,
+            status: String::from("按 Enter 发送，Esc 退出"),
         }
     }
 }
@@ -60,7 +62,14 @@ impl App {
 fn ui(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)].as_ref())
+        .constraints(
+            [
+                Constraint::Min(5),
+                Constraint::Length(1),
+                Constraint::Length(3),
+            ]
+            .as_ref(),
+        )
         .split(frame.area());
 
     // Render messages
@@ -70,9 +79,12 @@ fn ui(frame: &mut Frame, app: &App) {
         .map(|(role, content)| format!("{}: {}", role, content))
         .collect::<Vec<_>>()
         .join("\n");
-    let history =
-        Paragraph::new(history_text).block(Block::default().title("对话").borders(Borders::ALL));
+    let history = Paragraph::new(history_text);
     frame.render_widget(history, chunks[0]);
+
+    // Render status（输入框上方，无边框）
+    let status = Paragraph::new(app.status.as_str());
+    frame.render_widget(status, chunks[1]);
 
     // Render input（底部）
     let input = Paragraph::new(app.input.as_str()).block(
@@ -80,7 +92,7 @@ fn ui(frame: &mut Frame, app: &App) {
             .title("输入（Enter 发送，Esc 退出）")
             .borders(Borders::ALL),
     );
-    frame.render_widget(input, chunks[1]);
+    frame.render_widget(input, chunks[2]);
 }
 
 async fn send_to_openai(app: &mut App) -> Result<String, Box<dyn Error>> {
@@ -173,13 +185,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
 
                 app.messages.push(("user".to_string(), app.input.clone()));
+                app.status = "正在请求OpenAI...".to_string();
+                terminal.draw(|f| ui(f, &app))?;
                 match send_to_openai(&mut app).await {
                     Ok(reply) => {
                         app.messages.push(("assistant".to_string(), reply));
+                        app.status = "按 Enter 发送，Esc 退出".to_string();
                     }
                     Err(e) => {
                         app.messages
                             .push(("system".to_string(), format!("请求失败: {}", e)));
+                        app.status = format!("请求失败: {}", e);
                     }
                 }
                 app.input.clear();
